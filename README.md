@@ -47,7 +47,7 @@ Or manually: copy `index.ts` to `~/.pi/agent/extensions/dictate/index.ts`.
 ## Setup
 
 ```bash
-pacman -S sox xclip        # sox provides `rec` for audio capture
+pacman -S pulseaudio-utils xclip   # pulseaudio-utils provides `parec`
 ```
 
 The STT server must be running (Docker, default port 6006):
@@ -93,7 +93,9 @@ up changes.
 
 ## How it works
 
-- The extension spawns `rec` (sox) capturing 16kHz mono 16-bit PCM to stdout.
+- The extension spawns `parec` capturing 48 kHz stereo 16-bit PCM to stdout
+  (native, no conversion) with a 50 ms server-side buffer and decimates it
+  in-process 3:1 to the 16 kHz mono the server expects.
 - It opens a WebSocket to the local sherpa-onnx server and pipes the PCM
   stream in as binary frames.
 - The server answers with JSON `{"text", "is_final"}`: while you talk, a
@@ -171,10 +173,10 @@ npm test        # node --test (reducer + hotkey seams, no network)
   route/firewall allow the connection.
   `DICTATE_DEBUG=1` shows the WebSocket lifecycle in
   `/tmp/dictate-debug.log`.
-- **"Failed to spawn 'rec'" / "rec error"** — `pacman -S sox`, verify with
-  `which rec`.
+- **"Failed to spawn 'parec'" / "parec error"** — `pacman -S pulseaudio-utils`,
+  verify with `which parec`.
 - **No mic input** — first check the level meter: if the bars stay flat while
-  you talk, no audio is reaching sox.
+  you talk, no audio is reaching parec.
   PulseAudio/PipeWire users: make sure the terminal (or st) is allowed to open
   the default source.
 - **Nothing happens after stop** — errors are surfaced as pi notifications.

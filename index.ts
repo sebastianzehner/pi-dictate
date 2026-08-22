@@ -21,7 +21,7 @@
  * clipboard and a notification says so — a finished dictation is never lost.
  *
  * Requires:
- *   - sox installed (`pacman -S sox` — provides the `rec` command)
+ *   - pulseaudio-utils installed (`pacman -S pulseaudio-utils` — provides `parec`)
  *   - xclip installed (`pacman -S xclip` — clipboard fallback when no field is focused)
  *   - the local sherpa-onnx STT server (see wiki.techlab.icu/ai-hub/voice/sherpa-onnx)
  *
@@ -148,18 +148,6 @@ const PEAK_BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 const METER_FLOOR_DB = -50;
 const METER_CEILING_DB = -10;
 
-/** Compute normalized RMS (0..1) over a buffer of signed 16-bit little-endian PCM samples. */
-function rmsFromPcm16(buf: Buffer): number {
-  const sampleCount = Math.floor(buf.length / 2);
-  if (sampleCount === 0) return 0;
-  let sumSquares = 0;
-  for (let i = 0; i < sampleCount * 2; i += 2) {
-    const s = buf.readInt16LE(i);
-    sumSquares += s * s;
-  }
-  return Math.sqrt(sumSquares / sampleCount) / 32768;
-}
-
 /** Map a normalized RMS value to one of PEAK_BLOCKS by converting to dB and clamping into the visible range. */
 function rmsToBlock(rms: number): string {
   if (rms <= 0) return PEAK_BLOCKS[0]!;
@@ -167,6 +155,72 @@ function rmsToBlock(rms: number): string {
   const t = Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / (METER_CEILING_DB - METER_FLOOR_DB)));
   const idx = Math.floor(t * (PEAK_BLOCKS.length - 1));
   return PEAK_BLOCKS[idx]!;
+}
+
+// ── Downsampling: 48 kHz stereo → 16 kHz mono ────────────────────────────
+// Capture runs at 48 kHz/stereo (native) because sox's rec delivered
+// stdout in 32 kB blocks (~170 ms at this rate) and its 48k→16k conversion
+// path in ~1 s blocks — both too coarse for the level meter and the rolling
+// text. The 3:1 decimation happens in-process: L/R downmix, then a 25-tap
+// Hann-windowed sinc lowpass (cutoff 8 kHz, ~-40 dB stopband) evaluated at a
+// stride of 3. A 3-point box average was not enough — the E2E A/B against
+// sox's resampler misheard a word (see index.test.ts + the A/B runs).
+// Pure and exported for index.test.ts.
+const DS_TAPS: number[] = (() => {
+  const N = 25;
+  const alpha = (N - 1) / 2;
+  const fc = 8000 / 48000; // cutoff relative to the source rate
+  const taps = new Array<number>(N);
+  for (let n = 0; n < N; n++) {
+    const x = n - alpha;
+    const sinc = x === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * x) / (Math.PI * x);
+    const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1));
+    taps[n] = sinc * hann;
+  }
+  const gain = taps.reduce((a, b) => a + b, 0);
+  return taps.map((v) => v / gain); // unit DC gain
+})();
+
+/**
+ * Streaming 48 kHz stereo s16le → 16 kHz mono s16le decimator.
+ * `feed` returns the downsampled bytes for one input chunk; internal state
+ * (partial frame + FIR history) carries across chunks, so the output of
+ * chunked feeds is bit-identical to a single feed of the concatenated input.
+ */
+export function createDownsampler(): { feed: (chunk: Buffer) => Buffer } {
+  let tail = Buffer.alloc(0); // partial stereo frame (< 4 bytes)
+  let hist: number[] = []; // mono samples starting at the next output base
+  return {
+    feed(input: Buffer): Buffer {
+      const data = tail.length ? Buffer.concat([tail, input]) : input;
+      const frames = Math.floor(data.length / 4);
+      if (frames * 4 < data.length) tail = Buffer.from(data.subarray(frames * 4));
+      else tail = Buffer.alloc(0);
+      if (frames === 0) return Buffer.alloc(0);
+      // L/R downmix to mono (int32 so the sum is exact)
+      const mono = new Int32Array(frames);
+      for (let f = 0; f < frames; f++) {
+        mono[f] = (data.readInt16LE(f * 4) + data.readInt16LE(f * 4 + 2)) / 2;
+      }
+      const all = hist.concat(Array.from(mono));
+      // Output o needs input samples [o*3 .. o*3+24]; the first 25 samples
+      // prime the window.
+      const outSamples = Math.max(0, Math.floor((all.length - DS_TAPS.length) / 3));
+      const out = Buffer.alloc(outSamples * 2);
+      for (let o = 0; o < outSamples; o++) {
+        const base = o * 3;
+        let s = 0;
+        for (let k = 0; k < DS_TAPS.length; k++) s += DS_TAPS[k] * all[base + k];
+        let v = Math.round(s);
+        if (v > 32767) v = 32767;
+        else if (v < -32768) v = -32768;
+        out.writeInt16LE(v, o * 2);
+      }
+      // Next output base is 3*outSamples; the window for it starts there.
+      hist = all.slice(3 * outSamples);
+      return out;
+    },
+  };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -187,13 +241,17 @@ export default function (pi: ExtensionAPI) {
   // down the CURRENT live session.
   let generation = 0;
   // Audio meter state. `meter` is a ring of recent RMS values, newest at
-  // index METER_CELLS-1. `currentLevel` is the most recent RMS observed from
-  // any audio chunk — the meter tick just samples it. Crucially we never reset
-  // it: empty ticks re-render the last observed value, so the bars never drop
-  // to silence just because no chunk happened to arrive in that 60ms window.
+  // index METER_CELLS-1. `currentLevel` is the RMS of the most recent 16ms
+  // window of the downsampled stream — the meter tick just samples it.
+  // Crucially we never reset it: ticks between chunk arrivals re-render the
+  // last observed value, so the bars never drop to silence just because no
+  // chunk happened to arrive in that window.
   let meterTimer: NodeJS.Timeout | null = null;
   let meter: number[] = new Array(METER_CELLS).fill(0);
   let currentLevel = 0;
+  let meterWinCount = 0;
+  let meterWinSumSq = 0;
+  const METER_WINDOW = 256; // 16ms @ 16 kHz
 
   const setStatus = (msg: string | undefined) => {
     if (!activeCtx) return;
@@ -219,6 +277,8 @@ export default function (pi: ExtensionAPI) {
     stopMeter();
     meter = new Array(METER_CELLS).fill(0);
     currentLevel = 0;
+    meterWinCount = 0;
+    meterWinSumSq = 0;
     // Recording dot: a text glyph colored via the theme, not an emoji — emoji
     // presentation renders double-width in its own baked-in color and visually
     // shouts in the footer. `●` is the same dot pi's own docs use for
@@ -361,36 +421,41 @@ export default function (pi: ExtensionAPI) {
     dbg(`start (gen ${myGeneration})`);
     startMeter();
 
-    // Spawn sox `rec` to capture 16kHz / 16-bit / mono PCM to stdout.
+    // Spawn parec to capture 48 kHz / 16-bit / stereo PCM to stdout
+    // (native — the 3:1 decimation to 16 kHz/mono happens in-process).
     let proc: ChildProcessByStdio<null, Readable, Readable>;
     try {
       proc = spawn(
-        "rec",
+        "parec",
         [
-          "-q", // quiet
-          // Shrink sox's IO buffer so stdout flushes ~every 16ms instead of
-          // the default ~256ms. 512 bytes = 256 samples = 16ms at 16kHz/16-bit
-          // mono. This is the dominant source of meter latency.
-          "--buffer", "512",
-          "-r", "16000",
-          "-c", "1",
-          "-b", "16",
-          "-e", "signed-integer",
-          "-t", "raw",
-          "-", // stdout
+          "--raw", // raw PCM to stdout, no file header
+          "--rate=48000",
+          "--channels=2",
+          // explicit — parec's default format is s16ne (network byte order)
+          "--format=s16le",
+          // Server-side buffer: ~50 ms chunks (9600 B at this rate).
+          // Measured: sox `rec` delivers 32 kB blocks regardless of
+          // --buffer (170 ms at this rate, ~1 s in its conversion path) —
+          // too coarse for the level meter and the rolling text.
+          "--latency-msec=50",
+          "--process-time-msec=50",
         ],
         { stdio: ["ignore", "pipe", "pipe"] },
       );
     } catch (e: any) {
-      ctx.ui.notify("Failed to spawn 'rec'. Install sox: pacman -S sox", "error");
+      ctx.ui.notify("Failed to spawn 'parec'. Install pulseaudio-utils: pacman -S pulseaudio-utils", "error");
       cleanup();
       return;
     }
     rec = proc;
+    let recErr = "";
+    proc.stderr?.on("data", (c: Buffer) => {
+      recErr = (recErr + String(c)).slice(-400);
+    });
 
     proc.on("error", (err) => {
       if (myGeneration !== generation) return;
-      ctx.ui.notify(`rec error: ${err.message} (install sox: pacman -S sox)`, "error");
+      ctx.ui.notify(`parec error: ${err.message} (install pulseaudio-utils: pacman -S pulseaudio-utils)`, "error");
       cleanup();
     });
 
@@ -400,7 +465,10 @@ export default function (pi: ExtensionAPI) {
       // mid-recording is a problem.
       if (state === "recording" && code !== null && code !== 0) {
         if (activeCtx) {
-          activeCtx.ui.notify(`rec exited unexpectedly (code ${code})`, "warning");
+          activeCtx.ui.notify(
+            `parec exited unexpectedly (code ${code})${recErr ? `: ${recErr.trim()}` : ""}`,
+            "warning",
+          );
         }
         cleanup();
       }
@@ -422,12 +490,24 @@ export default function (pi: ExtensionAPI) {
       }
       dbg(`ws open (gen ${myGeneration})`);
       if (!rec || !ws) return;
+      const ds = createDownsampler();
       rec.stdout.on("data", (chunk: Buffer) => {
-        // Track loudness for the meter (just the latest chunk's RMS — the meter
-        // tick samples this), then forward to the STT server.
-        currentLevel = rmsFromPcm16(chunk);
+        const out = ds.feed(chunk);
+        if (out.length === 0) return;
+        // Meter: RMS per 16ms window of the downsampled stream. Chunks
+        // arrive ~every 170ms, so each burst fills ~10 windows and
+        // currentLevel ends up on the newest one.
+        for (let i = 0; i < out.length; i += 2) {
+          const s = out.readInt16LE(i);
+          meterWinSumSq += s * s;
+          if (++meterWinCount === METER_WINDOW) {
+            currentLevel = Math.sqrt(meterWinSumSq / METER_WINDOW) / 32768;
+            meterWinCount = 0;
+            meterWinSumSq = 0;
+          }
+        }
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(chunk);
+          ws.send(out);
         }
       });
     });

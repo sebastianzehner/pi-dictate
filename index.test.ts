@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { matchesKey, setKittyProtocolActive } from "@earendil-works/pi-tui";
 import {
   applySherpaMessage,
+  createDownsampler,
   initialTranscript,
   DICTATE_CANCEL_KEY,
   DICTATE_TOGGLE_KEY,
@@ -75,4 +76,44 @@ test("toggle key does NOT match the old alt+m sequence", () => {
 test("keys are distinct from each other", () => {
   assert.ok(!matchesKey("\x1b[109;6u", DICTATE_CANCEL_KEY));
   assert.ok(!matchesKey("\x1b[110;6u", DICTATE_TOGGLE_KEY));
+});
+
+// ── Downsampling (48 kHz stereo → 16 kHz mono) ─────────────────────
+
+test("downsample: constant stereo input stays constant mono (unit DC gain)", () => {
+  // 1s of 48k stereo at value 1000 (L=R=1000)
+  const input = Buffer.alloc(48000 * 2 * 2);
+  for (let i = 0; i < input.length; i += 2) input.writeInt16LE(1000, i);
+  const out = createDownsampler().feed(input);
+  // 48000 input samples → floor((48000 - 25) / 3) output samples (FIR priming)
+  assert.equal(out.length, 2 * Math.floor((48000 - 25) / 3));
+  for (let i = 0; i < out.length; i += 2) assert.equal(out.readInt16LE(i), 1000);
+});
+
+test("downsample: chunked feed (mid-frame split) == single feed", () => {
+  // 50ms of a 1 kHz sine at 48k stereo (L=R)
+  const frames = 2400;
+  const full = Buffer.alloc(frames * 4);
+  for (let f = 0; f < frames; f++) {
+    const s = Math.round(10000 * Math.sin((2 * Math.PI * 1000 * f) / 48000));
+    full.writeInt16LE(s, f * 4);
+    full.writeInt16LE(s, f * 4 + 2);
+  }
+  const outWhole = createDownsampler().feed(full);
+  const ds = createDownsampler();
+  const split = 4002; // mid-frame on purpose (4002 % 4 = 2)
+  const outA = ds.feed(full.subarray(0, split));
+  const outB = ds.feed(full.subarray(split));
+  assert.deepEqual(Buffer.concat([outA, outB]), outWhole);
+});
+
+test("downsample: priming — no output until 28 frames accumulated", () => {
+  const frame = Buffer.alloc(4);
+  frame.writeInt16LE(500, 0);
+  frame.writeInt16LE(500, 2);
+  const ds = createDownsampler();
+  for (let i = 0; i < 27; i++) assert.equal(ds.feed(Buffer.from(frame)).length, 0);
+  const out = ds.feed(Buffer.from(frame)); // 28th frame
+  assert.equal(out.length, 2);
+  assert.equal(out.readInt16LE(0), 500);
 });
