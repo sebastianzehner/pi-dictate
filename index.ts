@@ -374,6 +374,10 @@ export default function (pi: ExtensionAPI) {
     // the X11 clipboard and say so.
     try {
       const p = spawn("xclip", ["-selection", "clipboard"], { stdio: ["pipe", "ignore", "ignore"] });
+      // Crash-proof: neither a spawn failure (ENOENT) nor an early xclip
+      // death (EPIPE on stdin) may take pi down.
+      p.on("error", () => {});
+      p.stdin.on("error", () => {});
       p.stdin.end(text);
     } catch {}
     activeCtx.ui.notify("Dictation finished but no input field is focused — transcript copied to clipboard", "warning");
