@@ -28,10 +28,11 @@
  * Config (environment, read at extension load):
  *   - DICTATE_STT_URL       — WebSocket URL of the STT server
  *                             (default: ws://mac-studio.lan:6006)
- *   - DICTATE_LIVE_PREVIEW  — "1" renders the rolling transcript in the
- *                             status row while recording (default: off)
  *   - DICTATE_DEBUG         — "1" appends lifecycle events to
  *                             /tmp/dictate-debug.log (default: off)
+ *
+ * The live preview is a const at the top of the file (LIVE_PREVIEW),
+ * not an environment variable.
  *
  * Streaming model: audio is sent to the local sherpa-onnx server while you
  * talk; the server transcribes in real time and emits one rolling text that
