@@ -3,11 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Minimal voice dictation for pi (Deepgram Nova-3 streaming)",
+  "description": "Minimal voice dictation for pi (local sherpa-onnx server)",
   "license": "MIT",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "scripts": {
     "check": "tsc --noEmit",

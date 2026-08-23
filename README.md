@@ -42,7 +42,7 @@ Wayland isn't supported yet: `xclip` needs X11, would need a `wl-copy` fallback.
 ## Install
 
 ```bash
-pi install git:https://github.com/sebastianzehner/pi-dictate
+pi install git:github.com/sebastianzehner/pi-dictate
 ```
 
 Or manually: copy `index.ts` to `~/.pi/agent/extensions/dictate/index.ts`.
