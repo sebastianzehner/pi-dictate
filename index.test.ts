@@ -15,8 +15,7 @@ import {
 // as such. Regression guard for the dwm hotkey collision fix.
 setKittyProtocolActive(true);
 
-const msg = (text: string, isFinal: boolean) =>
-  JSON.stringify({ text, is_final: isFinal });
+const msg = (text: string, isFinal: boolean) => JSON.stringify({ text, is_final: isFinal });
 
 test("rolling message updates the rolling text", () => {
   const s: TranscriptState = applySherpaMessage(initialTranscript, msg("Hallo", false));

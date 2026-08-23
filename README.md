@@ -1,45 +1,48 @@
 # dictate
 
-Minimal voice dictation for pi, transcribed by a **local** sherpa-onnx server.
+Minimal voice dictation for [pi][1], transcribed by a **local** [sherpa-onnx][2] server.
 No floating bubbles, no menu bar app, no cloud, no API key.
 
+Repository: [sebastianzehner/pi-dictate](https://github.com/sebastianzehner/pi-dictate)
 
-- **Toggle:** `ctrl+shift+m` (press to start, press again to stop) — works
-  **anywhere in pi**, not just the main chat input: quiz popups,
-  `ask_user_question`, `ctx.ui.editor()`/`input()` dialogs, selectors. The key
-  is intercepted at the TUI input layer, before whatever component has focus.
-- **Cancel:** `ctrl+shift+n` (discard the in-flight transcript; safe to press
-  anytime, no-op when no dictation is in flight)
-- **Where text goes:** to whatever input field is focused **when you stop**
-  (never replaces, always appends):
-  - Main chat editor or any `ctx.ui.editor()`/`input()` popup → appended
-    directly.
-  - Opaque dialogs (quiz / ask_user_question selects) → typed in as
-    keystrokes. Their internal focus is invisible to the extension, so
-    **Tab into the note/Other field first** — that's where the text will land.
-  - Nothing text-capable focused → transcript is copied to the X11 clipboard
-    (via `xclip`) and a notification says so. A finished dictation is never
-    lost.
-- **Start guard:** if no input field is focused when you press the toggle,
-  dictation doesn't start and a notification explains why.
-- **Live feedback:** while recording, the status row shows a red `●` plus a
-  real-time mic-level meter (`● ▂▅▇ listening…`). With `DICTATE_LIVE_PREVIEW=1`
-  the rolling transcript is rendered in the same row — instant confirmation
-  that recognition is following your voice. On stop it flips to a
-  `finalizing…` spinner.
-- **Backend:** local sherpa-onnx streaming server
-  (German streaming Zipformer, `de-kroko-2025-08-06`), see
-  [wiki.techlab.icu/ai-hub/voice/sherpa-onnx](https://wiki.techlab.icu/ai-hub/voice/sherpa-onnx)
-- **What's "real-time":** audio is transcribed *while you talk*; the
-  finalized text is inserted in one shot when you stop.
-  Stop-to-display latency is typically a few tens of milliseconds over the
-  LAN.
-  The model emits punctuation natively.
+Fork of [amosblomqvist/pi-dictate](https://github.com/amosblomqvist/pi-dictate), ported to a local sherpa-onnx backend
+and native Linux (X11/PulseAudio) capture — see [What changed](#what-changed) below.
+
+- **Toggle:** `ctrl+shift+m` (start, then stop) — works anywhere in pi: chat input, quiz popups,
+  ask_user_question, editor dialogs, selectors, intercepted before whatever has focus.
+- **Cancel:** `ctrl+shift+n` — discards the in-flight transcript, safe to press anytime.
+- **Where text goes:** the focused input **when you stop**, always appended, never replaces:
+  - Editor or popup input → appended directly.
+  - Opaque dialogs (quiz, ask_user_question) → typed as keystrokes; **Tab into the note/Other field first**.
+  - Nothing focused → copied to the clipboard (`xclip`), with a notification.
+- **Start guard:** no focused input → dictation doesn't start, a notification explains why.
+- **Live feedback:** a red `●` plus a real-time mic-level meter (`● ▂▅▇ listening…`).
+  Set `LIVE_PREVIEW = true` in `index.ts` to also show the rolling transcript.
+  On stop: a brief `finalizing…` spinner, usually too fast to notice on a local server.
+- **Backend:** local sherpa-onnx server, [de-kroko-2025-08-06][3] (German streaming Zipformer).
+  Handles common English words too; swap in any other sherpa-onnx model server-side for other languages.
+- **Real-time:** transcribed while you talk, inserted in one shot on stop.
+  Typically tens of milliseconds over the LAN, punctuation included natively.
+
+## What changed
+
+Everything that differs from the upstream project:
+
+- **Backend:** Deepgram Nova-3 (cloud, API key) → local sherpa-onnx server, no API key, no cost.
+- **Platform:** macOS → Linux (X11, PulseAudio/PipeWire), see Requirements below.
+- **Capture:** `sox`/`rec` → `parec`, native 48 kHz with an in-process FIR downsampler, see [How it works](#how-it-works).
+- **Hotkeys:** `alt+m`/`alt+n` → `ctrl+shift+m`/`ctrl+shift+n`, avoiding a dwm shortcut collision.
+- **Clipboard fallback:** `pbcopy` → `xclip`.
+
+## Requirements
+
+Linux with X11 and PulseAudio/PipeWire (`pulseaudio-utils`, for `parec`).
+Wayland isn't supported yet: `xclip` needs X11, would need a `wl-copy` fallback.
 
 ## Install
 
 ```bash
-pi install git:https://git.techlab.icu/sebastianzehner/pi-dictate
+pi install git:https://github.com/sebastianzehner/pi-dictate
 ```
 
 Or manually: copy `index.ts` to `~/.pi/agent/extensions/dictate/index.ts`.
@@ -56,107 +59,67 @@ The STT server must be running (Docker, default port 6006):
 docker compose -f <path-to-sherpa-compose>/compose.yaml up -d
 ```
 
-Verify reachability: `ss -tlnp | grep 6006` on the server host, or
-`timeout 2 bash -c 'exec 3<>/dev/tcp/<host>/6006 && echo open'` from the pi
-host.
+Verify reachability: `ss -tlnp | grep 6006` (server host), or
+`timeout 2 bash -c 'exec 3<>/dev/tcp/<host>/6006 && echo open'` (pi host).
 
 ## Configuration
 
-Environment variables, read when the extension loads (restart pi after
-changes):
+Environment variables, read when the extension loads (restart pi after changes):
 
-| Variable             | Default                   | Effect                                              |
-| -------------------- | ------------------------- | --------------------------------------------------- |
-| `DICTATE_STT_URL`    | `ws://mac-studio.lan:6006`| WebSocket URL of the sherpa-onnx server             |
-| `DICTATE_LIVE_PREVIEW` | off                     | `1` renders the rolling transcript in the status row |
-| `DICTATE_DEBUG`      | off                       | `1` appends lifecycle events to `/tmp/dictate-debug.log` |
+| Variable          | Default                    | Effect                                                   |
+| ----------------- | -------------------------- | -------------------------------------------------------- |
+| `DICTATE_STT_URL` | `ws://mac-studio.lan:6006` | WebSocket URL of the sherpa-onnx server                  |
+| `DICTATE_DEBUG`   | off                        | `1` appends lifecycle events to `/tmp/dictate-debug.log` |
 
 ## Usage
 
-1. Focus any pi input field — the main chat input, a quiz note field, an
-   `ask_user_question` answer box.
-2. Press `ctrl+shift+m`.
-   The status row shows a red `●` with a live mic-level meter:
-   `● ▁▂▃▅ listening…`.
-   The bars move with your voice — if they stay flat, no audio is reaching
-   the extension.
+1. Focus any pi input field — chat input, quiz note field, ask_user_question answer box.
+2. Press `ctrl+shift+m` — status row shows `● ▁▂▃▅ listening…`, bars move with your voice.
 3. Talk.
-4. Press `ctrl+shift+m` again.
-   The meter is replaced by a braille spinner (`⠋ finalizing…`), then the
-   text appears in the focused input.
+4. Press `ctrl+shift+m` again — spinner (`⠋ finalizing…`), then the text lands in the focused input.
+   Focus is resolved fresh at stop time, so text goes wherever is focused then, not where you started.
 
-Focus is resolved fresh at stop time, so if a dialog opened (or focus moved)
-while you were talking, the text goes to whatever is focused at that moment.
-
-Run `/reload` in pi after first install (or after editing `index.ts`) to pick
-up changes.
+Run `/reload` after install or after editing `index.ts`.
 
 ## How it works
 
-- The extension spawns `parec` capturing 48 kHz stereo 16-bit PCM to stdout
-  (native, no conversion) with a 50 ms server-side buffer and decimates it
-  in-process 3:1 to the 16 kHz mono the server expects.
-- It opens a WebSocket to the local sherpa-onnx server and pipes the PCM
-  stream in as binary frames.
-- The server answers with JSON `{"text", "is_final"}`: while you talk, a
-  single rolling text that **replaces** itself on every update.
-  After we send the string `DONE`, one final arrives.
-  Unlike per-utterance finals, nothing needs joining.
-  The server keeps the connection open afterwards, so the client closes it.
-- The transcript is delivered on stop: the final if it arrived, otherwise the
-  last rolling text (best effort, e.g. after an abrupt disconnect).
-  A 3s timeout forces finalization if the final never comes.
-  The editor never shows revisable text.
-- While recording, each audio chunk's RMS loudness is mapped to a bar glyph
-  and shifted through a 6-cell ring every 60ms — the live level meter in the
-  status row.
-- **Focus-aware delivery:** the extension captures pi's `TUI` instance once
-  (via an invisible zero-height widget) and installs a `tui.addInputListener`
-  handler.
-  Listeners run *before* the focused component, which is why the hotkeys work
-  inside dialogs (extension shortcuts are otherwise only matched by the main
-  editor).
-  Kitty-protocol key **release/repeat** events are filtered out, so one
-  physical press toggles exactly once.
-  On stop it inspects `tui.focusedComponent`: editor-like components (anything
-  with `getText`/`setText`, including popups' inner `.editor`) get a direct
-  append; opaque components get the text as synthetic keystrokes routed by
-  their own focus logic.
+- `parec` captures 48 kHz stereo PCM natively (50 ms buffer); an in-process FIR filter decimates it 3:1 to the
+  16 kHz mono the server expects.
+- A WebSocket pipes the PCM to the local sherpa-onnx server as binary frames.
+- The server replies with JSON `{"text", "is_final"}`: a rolling text that replaces itself each update, then one
+  final after `DONE`.
+  The server doesn't close the connection, so the client does.
+- On stop: the final if it arrived, otherwise the last rolling text (best effort), or a 3s timeout forces it.
+- The level meter maps each chunk's RMS to a bar glyph, shifted through a 6-cell ring every 60ms.
+- **Focus-aware delivery:** an input listener runs before the focused component, so hotkeys work inside dialogs
+  too.
+  Key release/repeat events are filtered so one press toggles once.
+  On stop: editor-like components get a direct text append; opaque components (dialogs) get it as synthetic
+  keystrokes.
 
 ## Hotkeys and terminals
 
-The hotkeys are `ctrl+shift`-based because `alt+m`/`alt+n` collided with
-dwm's window-manager shortcuts on the primary workstation.
-That requires the terminal to emit them in **CSI-u (Kitty protocol) form** —
-verified sequences: `\x1b[109;6u` (ctrl+shift+m) and `\x1b[110;6u`
-(ctrl+shift+n).
-pi-tui parses the VTE-style modifier order (`;6` = shift|ctrl) correctly.
+Hotkeys are `ctrl+shift`-based because `alt+m`/`alt+n` collided with dwm shortcuts.
+Requires the terminal to emit CSI-u (Kitty protocol): `\x1b[109;6u` (m), `\x1b[110;6u` (n).
 
-- **st**: the `mappedkeys[]` table in `config.h` is adjusted to emit the
-  CSI-u sequences (terminal-side config, not part of this repo).
-- **tmux** (3.5+): forward modified keys in CSI-u form or the bindings
-  collapse to their legacy bytes (`ctrl+shift+m` → Enter):
+- **st**: `mappedkeys[]` in `config.h` adjusted to emit them (terminal-side, not in this repo).
+- **tmux** (3.5+): forward modified keys in CSI-u form, or `ctrl+shift+m` collapses to Enter:
 
-  ```
+  ```text
   set -g extended-keys on
   set -g extended-keys-format csi-u
   ```
 
-  See https://pi.dev/docs/latest/tmux for the full pi-on-tmux keyboard guide.
+  See [https://pi.dev/docs/latest/tmux](https://pi.dev/docs/latest/tmux) for the full pi-on-tmux keyboard guide.
 
 ## Customizing
 
 All knobs are at the top of `index.ts`:
 
-- **Hotkeys:** the `DICTATE_TOGGLE_KEY` / `DICTATE_CANCEL_KEY` constants
-  (`Key.ctrlShift("m")` / `Key.ctrlShift("n")`) — used by the input listener
-  `onGlobalInput` and the fallback `pi.registerShortcut` calls, and pinned by
-  `index.test.ts` against the verified terminal sequences.
-- **STT server / live preview / debug:** the `DICTATE_*` environment
-  variables (see Configuration).
-- **Level meter:** `METER_CELLS` (width in bars), `METER_TICK_MS` (update
-  rate), `METER_FLOOR_DB` / `METER_CEILING_DB` (loudness range mapped to
-  empty/full bars), `PREVIEW_MAX_CHARS` (live-preview width).
+- **Hotkeys:** `DICTATE_TOGGLE_KEY` / `DICTATE_CANCEL_KEY`, pinned by `index.test.ts` against the verified sequences.
+- **STT server / debug:** the `DICTATE_*` environment variables (see Configuration).
+- **Live preview:** `LIVE_PREVIEW` (default off), `PREVIEW_MAX_CHARS` (width, tail-truncated).
+- **Level meter:** `METER_CELLS`, `METER_TICK_MS`, `METER_FLOOR_DB`/`METER_CEILING_DB` (loudness range).
 
 ## Testing
 
@@ -167,31 +130,24 @@ npm test        # node --test (reducer + hotkey seams, no network)
 
 ## Troubleshooting
 
-- **"STT server error (ws://…)"** — the server isn't reachable from the pi
-  host.
-  Check the container is up (`docker ps`), the port is published, and the
-  route/firewall allow the connection.
-  `DICTATE_DEBUG=1` shows the WebSocket lifecycle in
-  `/tmp/dictate-debug.log`.
-- **"Failed to spawn 'parec'" / "parec error"** — `pacman -S pulseaudio-utils`,
-  verify with `which parec`.
-- **No mic input** — first check the level meter: if the bars stay flat while
-  you talk, no audio is reaching parec.
-  PulseAudio/PipeWire users: make sure the terminal (or st) is allowed to open
-  the default source.
-- **Nothing happens after stop** — errors are surfaced as pi notifications.
-  If you saw "no input field is focused", the transcript was copied to the
-  clipboard — paste with `ctrl+shift+v` (or your terminal's paste binding).
-- **Dictated text vanished into a quiz/ask dialog** — the dialog's option
-  list (not its text field) had focus. Tab into the note/Other field before
-  toggling dictation.
-- **Hotkeys don't fire in tmux** — tmux is collapsing `ctrl+shift+m` to
-  Enter because it isn't forwarding modified keys; enable `extended-keys` as
-  shown above.
-- **Garbage transcription of English words** — the model is German
-  (`de-kroko`); foreign terms are misrecognized by design.
-  Dictate the German equivalent or type the term.
-- **Need lifecycle logs?** Run pi with `DICTATE_DEBUG=1` — the extension
-  appends timestamped events (key hits, toggles, WebSocket open/error/close
-  with their session generation, transcript updates) to
-  `/tmp/dictate-debug.log`.
+- **"STT server error (ws://…)"** — server unreachable: check `docker ps`, the port, and firewall/route.
+  `DICTATE_DEBUG=1` logs the WebSocket lifecycle to `/tmp/dictate-debug.log`.
+- **"Failed to spawn `parec`"** — `pacman -S pulseaudio-utils`, verify with `which parec`.
+- **No mic input** — check the level meter: flat bars while talking means no audio is reaching `parec`.
+  PulseAudio/PipeWire: make sure the terminal is allowed to open the default source.
+- **Nothing happens after stop** — errors surface as pi notifications.
+  "No input field focused" means the transcript went to the clipboard instead — paste with `ctrl+shift+v`.
+- **Text vanished into a quiz/ask dialog** — the option list, not its text field, had focus.
+  Tab into the note/Other field before toggling dictation.
+- **Hotkeys don't fire in tmux** — it's collapsing `ctrl+shift+m` to Enter; enable `extended-keys` as shown above.
+- **Garbage English transcription** — the model is German (`de-kroko`), though it usually gets English words
+  right too; use an English model if you dictate mostly English.
+- **Need logs?** `DICTATE_DEBUG=1` appends timestamped lifecycle events to `/tmp/dictate-debug.log`.
+
+## License
+
+MIT, see [LICENSE](./LICENSE).
+
+[1]: https://github.com/earendil-works/pi
+[2]: https://github.com/k2-fsa/sherpa-onnx
+[3]: https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06/tree/main

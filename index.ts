@@ -98,8 +98,8 @@ const dbg = (msg: string) => {
 const STT_URL = process.env.DICTATE_STT_URL ?? "ws://mac-studio.lan:6006";
 
 // Optional live preview of the rolling text in the status row.
-const LIVE_PREVIEW = process.env.DICTATE_LIVE_PREVIEW === "1";
-const PREVIEW_MAX_CHARS = 32;
+const LIVE_PREVIEW = false;
+const PREVIEW_MAX_CHARS = 96;
 
 type State = "idle" | "recording" | "stopping";
 
@@ -118,8 +118,7 @@ interface EditorLike {
   setText(text: string): void;
 }
 type Target =
-  | { kind: "editor"; editor: EditorLike }
-  | { kind: "typable"; component: { handleInput(data: string): void } };
+  { kind: "editor"; editor: EditorLike } | { kind: "typable"; component: { handleInput(data: string): void } };
 
 const asEditorLike = (value: any): EditorLike | null =>
   value && typeof value.getText === "function" && typeof value.setText === "function" ? value : null;
@@ -293,7 +292,7 @@ export default function (pi: ExtensionAPI) {
       }
       // Live preview: sample the rolling text on the same tick as the meter.
       let text = transcript.rolling.replace(/\s+/g, " ").trim();
-      if (text.length > PREVIEW_MAX_CHARS) text = `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…`;
+      if (text.length > PREVIEW_MAX_CHARS) text = `…${text.slice(-(PREVIEW_MAX_CHARS - 1))}`;
       setStatus(text ? `${dot} ${bars} ${text}` : `${dot} ${bars} listening…`);
     };
     render();
@@ -518,8 +517,7 @@ export default function (pi: ExtensionAPI) {
       if (next === transcript) return; // no state change (non-JSON / post-final)
       transcript = next;
       dbg(
-        `transcript (gen ${myGeneration}, final=${next.final !== null}): ` +
-          JSON.stringify(next.final ?? next.rolling),
+        `transcript (gen ${myGeneration}, final=${next.final !== null}): ` + JSON.stringify(next.final ?? next.rolling),
       );
       // The final only matters while we're waiting for it; otherwise it's a
       // protocol surprise — latch it, stopDictation will finalize at once.
